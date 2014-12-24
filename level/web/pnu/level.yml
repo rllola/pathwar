@@ -1,0 +1,14 @@
+level:
+  name: Possible Not Upload
+  version: 1.0
+  author: Pathwar team
+  passphrases: 1
+  description: Possible, not upload
+  rootable: false
+  cpu_shares: 1/10
+  memory_limit: 16M
+  tags:
+    - advanced
+    - php
+  redump: 600
+  lang: en
