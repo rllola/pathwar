@@ -73,7 +73,9 @@ var (
 	composeUpInstanceKey = composeUpFlags.String("instance-key", "default", "instance key used to generate instance ID")
 
 	// compose down flags
-	composeDownFlags = flag.NewFlagSet("compose down", flag.ExitOnError)
+	composeDownFlags         = flag.NewFlagSet("compose down", flag.ExitOnError)
+	composeDownRemoveImages  = composePrepareFlags.Bool("rmi", false, "remove images as well")
+	composeDownRemoveVolumes = composePrepareFlags.Bool("volumes", true, "remove volumes")
 
 	// compose ps flags
 	composePSFlags = flag.NewFlagSet("compose ps", flag.ExitOnError)
@@ -437,7 +439,16 @@ func main() {
 			if err := globalPreRun(); err != nil {
 				return err
 			}
-			return pwcompose.Down(args, logger)
+			if len(args) < 1 {
+				return flag.ErrHelp
+			}
+
+			ids := args
+			return pwcompose.Down(
+				ids,
+				*composeDownRemoveImages,
+				*composeDownRemoveVolumes,
+				logger)
 		},
 	}
 

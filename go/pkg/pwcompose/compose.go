@@ -217,16 +217,79 @@ func Up(preparedCompose string, instanceKey string, logger *zap.Logger) error {
 	return nil
 }
 
-func Down(ids []string, logger *zap.Logger) error {
-	logger.Debug("down", zap.Strings("ids", ids))
-	// id can be an instance_id or a flavor_id
-	return fmt.Errorf("not implemented")
+func Down(ids []string, removeImages bool, removeVolumes bool, logger *zap.Logger) error {
+	logger.Debug("down", zap.Strings("ids", ids), zap.Bool("rmi", removeImages), zap.Bool("volumes", removeVolumes))
+
+	ctx := context.TODO()
+	cli, err := client.NewEnvClient()
+	if err != nil {
+		return fmt.Errorf("create docker client: %w", err)
+	}
+	pwInfos, err := updatePathwarInfos(ctx, cli)
+	if err != nil {
+		return fmt.Errorf("error retrieving pathwar containers infos: %w", err)
+	}
+
+	var (
+		containersToRemove []string
+		imagesToRemove     []string
+	)
+
+	for _, id := range ids {
+		for _, flavor := range pwInfos.RunningFlavors {
+			if id == flavor.Name || id == flavor.Name+":"+flavor.Version {
+				for _, instance := range flavor.Instances {
+					containersToRemove = append(containersToRemove, instance.ID)
+					if removeImages == true {
+						imagesToRemove = append(imagesToRemove, instance.ImageID)
+					}
+				}
+			}
+		}
+		for _, container := range pwInfos.RunningInstances {
+			if id == container.ID || id == container.ID[0:6] {
+				containersToRemove = append(containersToRemove, container.ID)
+				if removeImages == true {
+					imagesToRemove = append(imagesToRemove, container.ImageID)
+				}
+			}
+		}
+	}
+
+	for _, instanceID := range containersToRemove {
+		err := cli.ContainerRemove(ctx, instanceID, types.ContainerRemoveOptions{
+			Force:         true,
+			RemoveVolumes: removeVolumes,
+		})
+		if err != nil {
+			return fmt.Errorf("error while removing container: %w", err)
+		}
+		fmt.Println("removed container " + instanceID)
+	}
+
+	for _, imageID := range imagesToRemove {
+		_, err := cli.ImageRemove(ctx, imageID, types.ImageRemoveOptions{
+			Force:         true,
+			PruneChildren: true,
+		})
+		if err != nil {
+			return fmt.Errorf("error while removing container: %w", err)
+		}
+		fmt.Println("removed image " + imageID)
+	}
+
+	return nil
 }
 
 func PS(depth int, logger *zap.Logger) error {
 	logger.Debug("ps", zap.Int("depth", depth))
 
-	pwInfos, err := updatePathwarInfos()
+	ctx := context.TODO()
+	cli, err := client.NewEnvClient()
+	if err != nil {
+		return fmt.Errorf("create docker client: %w", err)
+	}
+	pwInfos, err := updatePathwarInfos(ctx, cli)
 	if err != nil {
 		return fmt.Errorf("error retrieving pathwar containers infos: %w", err)
 	}
@@ -242,17 +305,10 @@ func PS(depth int, logger *zap.Logger) error {
 	return nil
 }
 
-func updatePathwarInfos() (pathwarInfos, error) {
-
+func updatePathwarInfos(ctx context.Context, cli *client.Client) (pathwarInfos, error) {
 	pwInfos := pathwarInfos{
-		RunningFlavors: map[string]challengeFlavors{},
-	}
-
-	ctx := context.TODO()
-
-	cli, err := client.NewEnvClient()
-	if err != nil {
-		return pwInfos, fmt.Errorf("create docker client: %w", err)
+		RunningFlavors:   map[string]challengeFlavors{},
+		RunningInstances: map[string]types.Container{},
 	}
 
 	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{})
@@ -261,6 +317,9 @@ func updatePathwarInfos() (pathwarInfos, error) {
 	}
 
 	for _, container := range containers {
+		if _, pwcontainer := container.Labels[challengeNameLabel]; !pwcontainer {
+			continue
+		}
 		flavor := container.Labels[challengeNameLabel] + ":" + container.Labels[challengeVersionLabel]
 		if _, found := pwInfos.RunningFlavors[flavor]; !found {
 			challengeFlavor := challengeFlavors{
@@ -271,6 +330,7 @@ func updatePathwarInfos() (pathwarInfos, error) {
 			pwInfos.RunningFlavors[flavor] = challengeFlavor
 		}
 		pwInfos.RunningFlavors[flavor].Instances[container.ID] = container
+		pwInfos.RunningInstances[container.ID] = container
 	}
 
 	return pwInfos, nil
