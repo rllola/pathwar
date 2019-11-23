@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/snowflake"
+	"github.com/docker/docker/client"
 	_ "github.com/go-sql-driver/mysql" // required by gorm
 	"github.com/jinzhu/gorm"
 	"github.com/oklog/run"
@@ -73,9 +74,9 @@ var (
 	composeUpInstanceKey = composeUpFlags.String("instance-key", "default", "instance key used to generate instance ID")
 
 	// compose down flags
-	composeDownFlags         = flag.NewFlagSet("compose down", flag.ExitOnError)
-	composeDownRemoveImages  = composePrepareFlags.Bool("rmi", false, "remove images as well")
-	composeDownRemoveVolumes = composePrepareFlags.Bool("volumes", true, "remove volumes")
+	composeDownFlags        = flag.NewFlagSet("compose down", flag.ExitOnError)
+	composeDownRemoveImages = composePrepareFlags.Bool("rmi", false, "remove images as well")
+	composeDownKeepVolumes  = composePrepareFlags.Bool("keep-volumes", false, "keep volumes")
 
 	// compose ps flags
 	composePSFlags = flag.NewFlagSet("compose ps", flag.ExitOnError)
@@ -436,19 +437,28 @@ func main() {
 		Usage:   "pathwar [global flags] compose [compose flags] down [flags] ID [ID...]",
 		FlagSet: composeDownFlags,
 		Exec: func(args []string) error {
-			if err := globalPreRun(); err != nil {
-				return err
-			}
 			if len(args) < 1 {
 				return flag.ErrHelp
 			}
 
-			ids := args
+			if err := globalPreRun(); err != nil {
+				return err
+			}
+
+			ctx := context.Background()
+			cli, err := client.NewEnvClient()
+			if err != nil {
+				return fmt.Errorf("docker client: %w", err)
+			}
+
 			return pwcompose.Down(
-				ids,
+				ctx,
+				args,
 				*composeDownRemoveImages,
-				*composeDownRemoveVolumes,
-				logger)
+				!*composeDownKeepVolumes,
+				cli,
+				logger,
+			)
 		},
 	}
 
@@ -460,7 +470,14 @@ func main() {
 			if err := globalPreRun(); err != nil {
 				return err
 			}
-			return pwcompose.PS(*composePSDepth, logger)
+
+			ctx := context.Background()
+			cli, err := client.NewEnvClient()
+			if err != nil {
+				return fmt.Errorf("docker client: %w", err)
+			}
+
+			return pwcompose.PS(ctx, *composePSDepth, cli, logger)
 		},
 	}
 

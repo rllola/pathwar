@@ -9,10 +9,14 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
+	"github.com/dustin/go-humanize"
+	"github.com/olekukonko/tablewriter"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -31,6 +35,10 @@ func Prepare(challengeDir string, prefix string, noPush bool, version string, lo
 	cleanPath, err := filepath.Abs(filepath.Clean(challengeDir))
 	if err != nil {
 		return fmt.Errorf("get challenge dir: %w", err)
+	}
+
+	if prefix[len(prefix)-1:] != "/" {
+		prefix += "/"
 	}
 
 	var (
@@ -217,17 +225,19 @@ func Up(preparedCompose string, instanceKey string, logger *zap.Logger) error {
 	return nil
 }
 
-func Down(ids []string, removeImages bool, removeVolumes bool, logger *zap.Logger) error {
-	logger.Debug("down", zap.Strings("ids", ids), zap.Bool("rmi", removeImages), zap.Bool("volumes", removeVolumes))
+func Down(
+	ctx context.Context,
+	ids []string,
+	removeImages bool,
+	removeVolumes bool,
+	cli *client.Client,
+	logger *zap.Logger,
+) error {
+	logger.Debug("down", zap.Strings("ids", ids), zap.Bool("rmi", removeImages), zap.Bool("rm -v", removeVolumes))
 
-	ctx := context.TODO()
-	cli, err := client.NewEnvClient()
+	pwInfo, err := getPathwarInfo(ctx, cli)
 	if err != nil {
-		return fmt.Errorf("create docker client: %w", err)
-	}
-	pwInfos, err := updatePathwarInfos(ctx, cli)
-	if err != nil {
-		return fmt.Errorf("error retrieving pathwar containers infos: %w", err)
+		return fmt.Errorf("error retrieving pathwar containers info: %w", err)
 	}
 
 	var (
@@ -236,7 +246,7 @@ func Down(ids []string, removeImages bool, removeVolumes bool, logger *zap.Logge
 	)
 
 	for _, id := range ids {
-		for _, flavor := range pwInfos.RunningFlavors {
+		for _, flavor := range pwInfo.RunningFlavors {
 			if id == flavor.Name || id == flavor.Name+":"+flavor.Version {
 				for _, instance := range flavor.Instances {
 					containersToRemove = append(containersToRemove, instance.ID)
@@ -246,7 +256,7 @@ func Down(ids []string, removeImages bool, removeVolumes bool, logger *zap.Logge
 				}
 			}
 		}
-		for _, container := range pwInfos.RunningInstances {
+		for _, container := range pwInfo.RunningInstances {
 			if id == container.ID || id == container.ID[0:6] {
 				containersToRemove = append(containersToRemove, container.ID)
 				if removeImages == true {
@@ -281,57 +291,72 @@ func Down(ids []string, removeImages bool, removeVolumes bool, logger *zap.Logge
 	return nil
 }
 
-func PS(depth int, logger *zap.Logger) error {
+func PS(ctx context.Context, depth int, cli *client.Client, logger *zap.Logger) error {
 	logger.Debug("ps", zap.Int("depth", depth))
 
-	ctx := context.TODO()
-	cli, err := client.NewEnvClient()
+	pwInfo, err := getPathwarInfo(ctx, cli)
 	if err != nil {
-		return fmt.Errorf("create docker client: %w", err)
+		return fmt.Errorf("retrieve containers info: %w", err)
 	}
-	pwInfos, err := updatePathwarInfos(ctx, cli)
-	if err != nil {
-		return fmt.Errorf("error retrieving pathwar containers infos: %w", err)
-	}
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"ID", "CHALLENGE", "SVC", "PORTS", "STATUS", "CREATED"})
 
-	for _, flavor := range pwInfos.RunningFlavors {
-		fmt.Println(flavor.Name + " version " + flavor.Version + ":")
-		for _, container := range flavor.Instances {
-			fmt.Println("  " + container.Labels[serviceNameLabel])
+	for _, flavor := range pwInfo.RunningFlavors {
+		for uid, container := range flavor.Instances {
+
+			ports := []string{}
+			for _, port := range container.Ports {
+				if port.PublicPort != 0 {
+					ports = append(ports, strconv.Itoa(int(port.PublicPort)))
+				}
+			}
+			fmt.Println("AAA", ports, "BBB")
+
+			table.Append([]string{
+				uid[:7],
+				fmt.Sprintf("%s@%s", flavor.Name, flavor.Version),
+				container.Labels[serviceNameLabel],
+				strings.Join(ports, ", "),
+				strings.Replace(container.Status, "Up ", "", 1),
+				strings.Replace(humanize.Time(time.Unix(container.Created, 0)), " ago", "", 1),
+			})
 		}
-		fmt.Println("")
 	}
-
+	table.Render()
 	return nil
 }
 
-func updatePathwarInfos(ctx context.Context, cli *client.Client) (pathwarInfos, error) {
-	pwInfos := pathwarInfos{
-		RunningFlavors:   map[string]challengeFlavors{},
-		RunningInstances: map[string]types.Container{},
-	}
-
+func getPathwarInfo(ctx context.Context, cli *client.Client) (*pathwarInfo, error) {
 	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{})
 	if err != nil {
-		return pwInfos, fmt.Errorf("list containers: %w", err)
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+
+	pwInfo := pathwarInfo{
+		RunningFlavors:   map[string]challengeFlavors{},
+		RunningInstances: map[string]types.Container{},
 	}
 
 	for _, container := range containers {
 		if _, pwcontainer := container.Labels[challengeNameLabel]; !pwcontainer {
 			continue
 		}
-		flavor := container.Labels[challengeNameLabel] + ":" + container.Labels[challengeVersionLabel]
-		if _, found := pwInfos.RunningFlavors[flavor]; !found {
+		flavor := fmt.Sprintf(
+			"%s:%s",
+			container.Labels[challengeNameLabel],
+			container.Labels[challengeVersionLabel],
+		)
+		if _, found := pwInfo.RunningFlavors[flavor]; !found {
 			challengeFlavor := challengeFlavors{
 				Instances: map[string]types.Container{},
 			}
 			challengeFlavor.Name = container.Labels[challengeNameLabel]
 			challengeFlavor.Version = container.Labels[challengeVersionLabel]
-			pwInfos.RunningFlavors[flavor] = challengeFlavor
+			pwInfo.RunningFlavors[flavor] = challengeFlavor
 		}
-		pwInfos.RunningFlavors[flavor].Instances[container.ID] = container
-		pwInfos.RunningInstances[container.ID] = container
+		pwInfo.RunningFlavors[flavor].Instances[container.ID] = container
+		pwInfo.RunningInstances[container.ID] = container
 	}
 
-	return pwInfos, nil
+	return &pwInfo, nil
 }
